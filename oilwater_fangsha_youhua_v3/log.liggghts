@@ -1,0 +1,58 @@
+LIGGGHTS (Version LIGGGHTS-INL 4.0.0, compiled 2026-09-17-11:52:29 by sc52079, git commit 427db1fbd1cbf8ee423d25bbd58a2f7d2d0bf6f6)
+variable rho_fluid equal 1000
+variable dmp_dir string /public3/home/sc52079/LBDEM_runs/oilwater_1pv_m2_n20_v2/post/
+variable pack_file string data/oilwater_fangsha.porepack
+variable output_prefix string oilwater_1pv_m2_n20_v2__
+variable dem_neighbor_skin equal 1e-05
+variable dem_neighbor_delay equal 0
+variable dem_neighbor_every equal 1
+variable dem_neighbor_one equal 10000
+variable dem_neighbor_page equal 1e+06
+variable dem_youngs_modulus equal 5e+06
+variable dem_poisson_ratio equal 0.25
+variable dem_restitution equal 0.3
+variable dem_friction equal 0.5
+variable screen_youngs_modulus equal 5e+06
+variable screen_poisson_ratio equal 0.3
+variable screen_restitution equal 0.2
+variable screen_friction equal 0.6
+variable dem_max_particle_speed equal 0.07575
+variable dem_max_particle_omega equal 2000
+variable bond_radius_multiplier equal 1
+variable bond_pfc_effective_modulus equal 6e+08
+variable bond_pfc_stiffness_ratio equal 2.4
+variable bond_sigma equal 2000
+variable bond_tau equal 2400
+variable bond_dnf equal 0
+variable bond_dtf equal 0
+variable bond_dnt equal 0
+variable bond_dtt equal 0
+variable bond_create_distance equal 0.000225
+variable bond_create_ratio equal 1.00001
+variable dem_viscous_damping equal 2e-08
+variable dem_thermo_every equal 1000
+variable phys_dx equal 1e-05
+variable domain_lx equal 0.0023
+variable domain_ly equal 0.001
+variable domain_lz equal 0.001
+variable dem_box_xhi equal 0.00231
+variable outlet_x equal 0.0023
+# =============================================================================
+# in.lbdem —— LIGGGHTS 第一段输入脚本：建立 DEM 颗粒体系（几何、材料、胶结、耦合、壁面）
+#
+# 【什么时候执行】主程序 oilwaterDrive.cpp 在完成单位换算后、建 LBM 格子之前，
+#   调用 wrapper.execFile("in.lbdem") 执行本文件（见 oilwaterDrive.cpp 第 3 步）。
+#   之后 C++ 再执行 in2.lbdem 设定积分器和输出，然后进入主循环。
+# 【三类颗粒】type 1 = 固定骨架颗粒（不动）；type 2 = 弱胶结细粒（可脱落、运移、产出）；
+#   type 3 = 出口筛网丝（固定，用来拦砂）。
+# 【${...} 变量】所有 ${xxx} 都不是在这里定义的，而是 C++ 通过 wrapper.setVariable("xxx", 值)
+#   传进来的，数值最终来自 config/defaults.env（或实验 .env 覆盖）。
+# 【阅读提示】LIGGGHTS 命令格式是 "命令 参数..."；fix 是"持续生效的设置/操作"，
+#   property/global 是"全局材料属性表"，peratomtype 按颗粒类型给值，peratomtypepair 按类型对给值
+#   （3 类颗粒 → 3×3=9 个数，顺序是 11 12 13 21 22 23 31 32 33）。
+# =============================================================================
+
+echo both                                                              # 命令和结果同时打印到屏幕和日志，便于排错
+log ${dmp_dir}/${output_prefix}log.liggghts                              # DEM 日志放进本次运行的输出目录，文件名带实验名前缀
+log /public3/home/sc52079/LBDEM_runs/oilwater_1pv_m2_n20_v2/post//${output_prefix}log.liggghts                              
+log /public3/home/sc52079/LBDEM_runs/oilwater_1pv_m2_n20_v2/post//oilwater_1pv_m2_n20_v2__log.liggghts                              

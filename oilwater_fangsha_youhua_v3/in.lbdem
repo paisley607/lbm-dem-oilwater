@@ -1,0 +1,100 @@
+# =============================================================================
+# in.lbdem —— LIGGGHTS 第一段输入脚本：建立 DEM 颗粒体系（几何、材料、胶结、耦合、壁面）
+#
+# 【什么时候执行】主程序 oilwaterDrive.cpp 在完成单位换算后、建 LBM 格子之前，
+#   调用 wrapper.execFile("in.lbdem") 执行本文件（见 oilwaterDrive.cpp 第 3 步）。
+#   之后 C++ 再执行 in2.lbdem 设定积分器和输出，然后进入主循环。
+# 【三类颗粒】type 1 = 固定骨架颗粒（不动）；type 2 = 弱胶结细粒（可脱落、运移、产出）；
+#   type 3 = 出口筛网丝（固定，用来拦砂）。
+# 【${...} 变量】所有 ${xxx} 都不是在这里定义的，而是 C++ 通过 wrapper.setVariable("xxx", 值)
+#   传进来的，数值最终来自 config/defaults.env（或实验 .env 覆盖）。
+# 【阅读提示】LIGGGHTS 命令格式是 "命令 参数..."；fix 是"持续生效的设置/操作"，
+#   property/global 是"全局材料属性表"，peratomtype 按颗粒类型给值，peratomtypepair 按类型对给值
+#   （3 类颗粒 → 3×3=9 个数，顺序是 11 12 13 21 22 23 31 32 33）。
+# =============================================================================
+
+echo both                                                              # 命令和结果同时打印到屏幕和日志，便于排错
+log ${dmp_dir}/${output_prefix}log.liggghts                              # DEM 日志放进本次运行的输出目录，文件名带实验名前缀
+
+units si                                                               # 全部采用国际单位制（m、kg、s、Pa）
+atom_style granular                                                    # "颗粒"原子类型：每个颗粒有半径、密度、角速度
+atom_modify map array                                                  # 建立"颗粒 id → 数组下标"的映射，C++ 按 id 查找颗粒时需要
+communicate single vel yes                                             # 进程间交换 ghost 颗粒时连速度一起传（接触力计算需要）
+boundary f f f                                                         # 三个方向都是固定(非周期)边界；越出盒子的颗粒按 lost 处理
+newton off                                                             # 关闭 Newton 第三定律的跨进程优化，耦合时更稳妥
+
+# ── 多进程(np≥2)分块约束：x 方向只用 1 个进程，y/z 自动分块 ───────────────────────
+# DEM 盒在 x 方向比 LBM 域多出一小段"删除缓冲"（见下面 change_box），若 x 也分块，
+# DEM 与 LBM 的分块边界会错位，跨边界的颗粒可能与它覆盖的格点落在不同进程上。
+# 固定 x 方向 1 个进程、只在 y/z 并行即可规避。此命令必须写在 read_data（建盒）之前。
+# 注：np≥2 时真正导致段错误的是 Palabos 的 SmagorinskyRegularizedDynamics 跨块序列化 bug，
+#     已在主程序改用 SecuredSmagorinskyRegularizedDynamics 修复（见 C++ DYNAMICS 注释）。
+processors 1 * *                                                        # x 方向 1 个进程，其余进程自动分给 y/z
+
+read_data ${pack_file}                                                 # 读入颗粒包文件（位置/半径/类型），路径来自命令行第 14 个参数 PACK_FILE
+group weak type 2                                                      # 定义 weak 组 = 所有可动细粒；后面水动力只施加给它们
+group screen type 3                                                    # 定义 screen 组 = 出口筛网；参与占据格点和接触，但始终冻结
+
+# ── DEM 出口删除缓冲（只影响 DEM 盒，不影响流体域）─────────────────────────────
+# 产出颗粒的删除判据是"球心越过 domain_lx"，由 C++ 每 3 个 LBM 步执行一次 delete_atoms。
+# 颗粒从越界到被删最多再走 ~0.5 μm，所以只要一段很小的缓冲，就能避免颗粒在"越界后、
+# 被删前"被 boundary f 当作 lost 静默丢掉（那样会破坏颗粒数守恒）。
+change_box all x final 0.0 ${dem_box_xhi} units box                    # 把 DEM 盒 x 上限扩到 DEM_BOX_XHI_M；流体出口仍在 domain_lx
+region prodzone block ${domain_lx} INF INF INF INF INF units box       # 预定义"产出区"= x>domain_lx，运行中直接用，不必重建接触历史
+
+neighbor ${dem_neighbor_skin} bin                                      # 邻居表皮层厚度 [m]：颗粒间距小于 (接触距离+皮层) 时登记为邻居
+neigh_modify delay ${dem_neighbor_delay} every ${dem_neighbor_every} check yes one ${dem_neighbor_one} page ${dem_neighbor_page} # 邻居表更新频率与内存容量（one=单颗粒最大邻居数，page=每页条目数）
+
+# ── 材料属性（3 类颗粒：1=骨架，2=可动细粒，3=固定筛网）────────────────────────
+# Hertz 接触模型需要杨氏模量、泊松比（按类型）以及恢复系数、摩擦系数（按类型对）。
+fix m1 all property/global youngsModulus peratomtype ${dem_youngs_modulus} ${dem_youngs_modulus} ${screen_youngs_modulus}  # 杨氏模量 [Pa]：骨架、细粒同值，筛网单独给
+fix m2 all property/global poissonsRatio peratomtype ${dem_poisson_ratio} ${dem_poisson_ratio} ${screen_poisson_ratio}  # 泊松比：同上
+fix m3 all property/global coefficientRestitution peratomtypepair 3 ${dem_restitution} ${dem_restitution} ${screen_restitution} ${dem_restitution} ${dem_restitution} ${screen_restitution} ${screen_restitution} ${screen_restitution} ${screen_restitution}  # 恢复系数(碰撞能量损失)：9 个值按 11 12 13 21 22 23 31 32 33 排列，涉及筛网(3)的对用筛网值
+fix m4 all property/global coefficientFriction peratomtypepair 3 ${dem_friction} ${dem_friction} ${screen_friction} ${dem_friction} ${dem_friction} ${screen_friction} ${screen_friction} ${screen_friction} ${screen_friction}  # 滑动摩擦系数：排列规则同上
+
+# ── LIGGGHTS-INL 平行键（parallel bond）胶结模型，用 PFC 的"可变形键"换算接口 ───
+# 只允许 type1(骨架)-type2(细粒) 之间成键，模拟"细粒胶结在骨架上"；
+# type1-type1、type2-type2 的键半径系数设为 0，相当于不胶结。
+# 输入的是等效模量 E* [Pa] 和法向/切向刚度比；内核对每根键按 PFC 公式
+#   L = R1+R2，kn = E*/L，ks = kn/ratio
+# 换算成单位面积刚度 [Pa/m]，所以不必手工给 kn、ks。
+fix pb_r all property/global radiusMultiplierBond peratomtypepair 3 0.0 ${bond_radius_multiplier} 0.0 ${bond_radius_multiplier} 0.0 0.0 0.0 0.0 0.0  # 键半径 = 系数 × 小颗粒半径；只有 12/21 对非零
+fix pb_emod all property/global parallelBondEffectiveModulus peratomtypepair 3 ${bond_pfc_effective_modulus} ${bond_pfc_effective_modulus} ${bond_pfc_effective_modulus} ${bond_pfc_effective_modulus} ${bond_pfc_effective_modulus} ${bond_pfc_effective_modulus} ${bond_pfc_effective_modulus} ${bond_pfc_effective_modulus} ${bond_pfc_effective_modulus}  # 键等效模量 E* [Pa]（所有对同值，反正只有 12 对成键）
+fix pb_krat all property/global parallelBondStiffnessRatio peratomtypepair 3 ${bond_pfc_stiffness_ratio} ${bond_pfc_stiffness_ratio} ${bond_pfc_stiffness_ratio} ${bond_pfc_stiffness_ratio} ${bond_pfc_stiffness_ratio} ${bond_pfc_stiffness_ratio} ${bond_pfc_stiffness_ratio} ${bond_pfc_stiffness_ratio} ${bond_pfc_stiffness_ratio}  # 法向/切向刚度比 kn/ks
+fix pb_sig all property/global maxSigmaBond peratomtypepair 3 ${bond_sigma} ${bond_sigma} ${bond_sigma} ${bond_sigma} ${bond_sigma} ${bond_sigma} ${bond_sigma} ${bond_sigma} ${bond_sigma}  # 键的抗拉强度 [Pa]：法向应力超过即断键
+fix pb_tau all property/global maxTauBond peratomtypepair 3 ${bond_tau} ${bond_tau} ${bond_tau} ${bond_tau} ${bond_tau} ${bond_tau} ${bond_tau} ${bond_tau} ${bond_tau}  # 键的抗剪强度 [Pa]：剪应力超过即断键
+fix pb_dnf all property/global dampingNormalForceBond peratomtypepair 3 ${bond_dnf} ${bond_dnf} ${bond_dnf} ${bond_dnf} ${bond_dnf} ${bond_dnf} ${bond_dnf} ${bond_dnf} ${bond_dnf}  # 键法向力阻尼系数（抑制数值振荡）
+fix pb_dtf all property/global dampingTangentialForceBond peratomtypepair 3 ${bond_dtf} ${bond_dtf} ${bond_dtf} ${bond_dtf} ${bond_dtf} ${bond_dtf} ${bond_dtf} ${bond_dtf} ${bond_dtf}  # 键切向力阻尼系数
+fix pb_dnt all property/global dampingNormalTorqueBond peratomtypepair 3 ${bond_dnt} ${bond_dnt} ${bond_dnt} ${bond_dnt} ${bond_dnt} ${bond_dnt} ${bond_dnt} ${bond_dnt} ${bond_dnt}  # 键法向(扭转)力矩阻尼系数
+fix pb_dtt all property/global dampingTangentialTorqueBond peratomtypepair 3 ${bond_dtt} ${bond_dtt} ${bond_dtt} ${bond_dtt} ${bond_dtt} ${bond_dtt} ${bond_dtt} ${bond_dtt} ${bond_dtt}  # 键切向(弯曲)力矩阻尼系数
+# 建键时机与判据：只在第 1 个 DEM 步建一次初始键，之后不再新建（断了就是断了，不会"自愈"）。
+# 两个距离阈值配合使用：绝对距离保证邻居表能覆盖到最大的相切对；
+# 归一化比值 r/(ri+rj) < 1.00001 精确挑出初始相切的"母颗粒-细粒"对，
+# 排除最近的非相切对（颗粒包里最小的非相切比值是 1.0000649）。
+fix pb_ts all property/global tsCreateBond scalar 1                       # tsCreateBond=1：仅第 1 步建键
+fix pb_cd all property/global createDistanceBond peratomtypepair 3 0.0 ${bond_create_distance} 0.0 ${bond_create_distance} 0.0 0.0 0.0 0.0 0.0  # 建键绝对距离阈值 [m]，只对 12/21 对生效
+fix pb_cdr all property/global createDistanceBondRatio peratomtypepair 3 0.0 ${bond_create_ratio} 0.0 ${bond_create_ratio} 0.0 0.0 0.0 0.0 0.0  # 建键归一化距离阈值 r/(ri+rj)，只对 12/21 对生效
+
+# 接触模型：Hertz 法向 + 带历史的切向(摩擦) + cohesion bond(平行键)。
+#   stressBreak on             按应力(σ/τ 超过 maxSigmaBond/maxTauBond)判断断键，而不是按力
+#   normalizedCreateDistance on 建键用上面的归一化距离比值
+#   pfcDeformability on        用 PFC 可变形键公式逐键换算刚度
+pair_style gran model hertz tangential history cohesion bond stressBreak on normalizedCreateDistance on pfcDeformability on
+pair_coeff * *                                                        # 所有类型对都用上面这个接触模型
+
+# ── LBM-DEM 耦合 fix ────────────────────────────────────────────────────────
+# couple/lb/onetoone 是 LBDEMcoupling 自带的 fix：C++ 每个耦合步把 IBM 算出的流体力/力矩
+# 写到这里，DEM 再积分。它不接受额外关键字，所以这里只能写标准的三个字段。
+# 水动力是否超限由 C++ 在写回 DEM 后审计：超限会中止运行，而不是悄悄裁剪物理力。
+fix lbcoupling weak couple/lb/onetoone                                  # 只给 weak 组(可动细粒)施加流体力；骨架和筛网不受力
+
+# ── 机械壁面：外部出口始终开放，固定的 type3 筛网是唯一的防砂边界 ─────────────────
+# wall/gran = 用颗粒接触模型(同样是 Hertz+摩擦)处理颗粒与平面壁的碰撞；
+# primitive type 1 表示壁面材料按 type1 的属性取值；xplane/yplane/zplane 给平面位置。
+fix wall_xlo all wall/gran model hertz tangential history primitive type 1 xplane 0.0      # x=0 入口端壁，所有颗粒都不能从入口退出
+# DEM 机械壁与 LBM 的 y/z 反弹壁位置重合，球心自然保持至少一个半径的净空。
+# 不再用内缩壁或角柱，避免把报告里的方形通道暗中变成圆角窄通道。
+fix wall_ylo weak wall/gran model hertz tangential history primitive type 1 yplane 0.0     # y=0 侧壁（只对可动细粒生效，骨架本来不动）
+fix wall_yhi weak wall/gran model hertz tangential history primitive type 1 yplane ${domain_ly} # y=Ly 侧壁
+fix wall_zlo weak wall/gran model hertz tangential history primitive type 1 zplane 0.0     # z=0 侧壁
+fix wall_zhi weak wall/gran model hertz tangential history primitive type 1 zplane ${domain_lz} # z=Lz 侧壁

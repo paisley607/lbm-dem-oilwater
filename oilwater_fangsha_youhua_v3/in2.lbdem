@@ -1,0 +1,52 @@
+# =============================================================================
+# in2.lbdem —— LIGGGHTS 第二段输入脚本：时间步长、分组、积分器、统计与输出
+#
+# 【什么时候执行】主程序 oilwaterDrive.cpp 在两套 LBM 格子（水/油）建好、初始相分布
+#   设好之后，算出 DEM 子步长 dt_dem，再调用 wrapper.execFile("in2.lbdem") 执行本文件，
+#   随后立即进入"LBM 一步 ↔ DEM 若干子步"的主循环。
+# 【为什么拆成两段】in.lbdem 建体系时还不知道 LBM 的 Δt（取决于 N、uMax、τ 等），
+#   所以步长、输出间隔这些依赖 Δt 的设置放到第二段。
+# 【三类颗粒】type 1 = 骨架（冻结）；type 2 = 弱胶结细粒（唯一被积分、可运移的组）；
+#   type 3 = 出口筛网（冻结）。
+# 【${...} 变量】均由 C++ 通过 wrapper.setVariable 传入：t_step = dt_dem，
+#   dmp_stp = 颗粒输出间隔(DEM 步)，dem_max_particle_speed/omega、dem_viscous_damping、
+#   dem_thermo_every 来自 config/defaults.env。
+# =============================================================================
+
+timestep ${t_step}                                                     # DEM 子步长 [s] = LBM Δt / DEM_SUBSTEPS，由 C++ 算好传入
+
+# ── 分组：骨架和筛网固定；胶结细粒可脱落和运移 ────────────────────────────────
+group skeleton type 1                                                  # 骨架组
+group weak     type 2                                                  # 可动细粒组（in.lbdem 已定义过，这里重复定义无害）
+group screen   type 3                                                  # 出口筛网组
+group fixed union skeleton screen                                      # fixed = 骨架 ∪ 筛网，即所有"不做时间积分"的固体
+
+velocity all set 0.0 0.0 0.0                                           # 初始时刻所有颗粒静止
+
+# 平行键已在 in.lbdem 的 pair_style 里启用，并在第 1 个 DEM 步按初始相切关系建好。
+# bond/counter 这个 compute 给出三个数：[1] 本统计周期新建的键数、[2] 本周期断裂的键数、
+# [3] 当前存活的键数。C++ 每个耦合步读它来统计断键，作为"细粒脱落"的直接证据。
+compute bond_status all bond/counter                                   # 键数统计，名字 bond_status 被 C++ 通过 find_compute 查找
+
+# ── 运动学：冻结骨架和筛网，只对细粒做时间积分 ───────────────────────────────
+# 骨架/筛网用 freeze 固定（力清零、不积分）；细粒用 nve/sphere 做完整的平动+转动积分，
+# 这样滚动、摩擦、穿过孔喉以及胶结键的力矩响应都保留。两者分开，避免重复积分。
+fix freeze_fixed fixed freeze                                          # 冻结 fixed 组：骨架和筛网永远不动
+fix integr_weak weak nve/sphere/limit vlimit ${dem_max_particle_speed} omegalimit ${dem_max_particle_omega}  # 细粒积分器；vlimit/omegalimit 是每个 DEM 步的速度/角速度硬上限
+# 细粒速度上限 vlimit 由 C++ 按 PARTICLE_MACH_LIMIT×Δx/Δt 自动计算（DEM_MAX_PARTICLE_SPEED_M_S=0 时）。
+# 目的是保证 IBM 移动边界的格子马赫数不超标；触发次数由 C++ 累计写入审计 CSV。
+# 名字 integr_weak 被 C++ 通过 find_fix 查找，不要改名。
+variable damp_c  equal ${dem_viscous_damping}                          # 黏性阻尼系数 [N·s/m]，来自 DEM_VISCOUS_DAMPING
+fix damp_weak   weak viscous ${damp_c}                                 # 给细粒加轻微黏性阻尼：耗散数值毛刺，但不妨碍流体驱动运移
+# LIGGGHTS-INL 没有旧版的 wall/reflect；五个非出口面已由 in.lbdem 的 Hertz wall/gran 封闭。
+# 右端(出口)从一开始就是开放的，防砂完全靠 type3 固定筛网。
+
+# ── 日志与颗粒输出 ──────────────────────────────────────────────────────────
+thermo ${dem_thermo_every}                                             # 每隔多少 DEM 步打印一行热力学信息，来自 DEM_THERMO_EVERY
+thermo_style custom step atoms ke                                      # 打印：步数、颗粒数、动能。不打印 bond_status，以免 thermo 重置计数器
+thermo_modify lost warn                                                # 颗粒越出盒子时发出警告而不是静默删除，便于区分真实产出与异常丢失
+
+# 颗粒 dump：每 dmp_stp 个 DEM 步写一个文件，含三类颗粒的 id、类型、位置、速度、半径、受力。
+# 文件名里的 * 会被替换成步数；后处理脚本 convert_liggghts_to_csv.py 读这些文件。
+dump dmp all custom ${dmp_stp} ${dmp_dir}/${output_prefix}particles_*.liggghts id type x y z vx vy vz radius fx fy fz
+dump_modify dmp sort id                                                # 输出按颗粒 id 排序，方便逐颗粒追踪

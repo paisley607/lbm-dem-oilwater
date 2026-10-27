@@ -1,0 +1,5 @@
+Beginning time is 2026-10-27_18:14:56
+LBM-DEM 环境已加载: GCC 12.2 + OpenMPI 4.1.1 + VTK 9.1
+运行目录: /public3/home/sc52079/LiuMingJie/LBDEMcoupling-public-master/examples/oilwater_fangsha_youhua_v3
+/var/spool/slurm/d/job12388100/slurm_script: line 39: syntax error near unexpected token `newline'
+/var/spool/slurm/d/job12388100/slurm_script: line 39: ` python3 plan_run.py --np 64 --mlups-per-core <实测MLU/s除以64>'
